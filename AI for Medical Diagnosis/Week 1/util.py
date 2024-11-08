@@ -3,10 +3,11 @@ import random
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-from keras import backend as K
+import tensorflow.keras.backend as K
 from keras.preprocessing import image
 from sklearn.metrics import roc_auc_score, roc_curve
 from tensorflow.compat.v1.logging import INFO, set_verbosity
+import tensorflow as tf
 
 random.seed(a=None, version=2)
 
@@ -38,25 +39,34 @@ def load_image(img, image_dir, df, preprocess=True, H=320, W=320):
 
 
 def grad_cam(input_model, image, cls, layer_name, H=320, W=320):
-    """GradCAM method for visualizing input saliency."""
-    y_c = input_model.output[0, cls]
-    conv_output = input_model.get_layer(layer_name).output
-    grads = K.gradients(y_c, conv_output)[0]
+    """GradCAM method for visualizing input saliency with TensorFlow 2 and GradientTape."""
+    # Get the target layer output and model predictions
+    conv_layer = input_model.get_layer(layer_name).output
+    grad_model = tf.keras.models.Model(
+        [input_model.inputs], [conv_layer, input_model.output]
+    )
+    
+    with tf.GradientTape() as tape:
+        # Forward pass
+        conv_outputs, predictions = grad_model(image)
+        loss = predictions[:, cls]
+    
+    # Compute gradients of the target class with respect to the feature map
+    grads = tape.gradient(loss, conv_outputs)[0]
+    
+    # Compute the guided gradients
+    weights = tf.reduce_mean(grads, axis=(0, 1))
+    cam = tf.reduce_sum(weights * conv_outputs[0], axis=-1)
+    
+    # Process CAM: Apply ReLU and normalize
+    cam = tf.maximum(cam, 0)  # ReLU activation
+    cam = cam / (tf.reduce_max(cam) + 1e-8)  # Normalize between 0 and 1
 
-    gradient_function = K.function([input_model.input], [conv_output, grads])
-
-    output, grads_val = gradient_function([image])
-    output, grads_val = output[0, :], grads_val[0, :, :, :]
-
-    weights = np.mean(grads_val, axis=(0, 1))
-    cam = np.dot(output, weights)
-
-    # Process CAM
-    cam = cv2.resize(cam, (W, H), cv2.INTER_LINEAR)
-    cam = np.maximum(cam, 0)
-    cam = cam / cam.max()
+    # Resize CAM using OpenCV
+    cam = cam.numpy()  # Convert to NumPy before using OpenCV
+    cam = cv2.resize(cam, (W, H), interpolation=cv2.INTER_LINEAR)
+    
     return cam
-
 
 def compute_gradcam(model, img, image_dir, df, labels, selected_labels,
                     layer_name='bn'):
